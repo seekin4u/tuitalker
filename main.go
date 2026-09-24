@@ -54,6 +54,106 @@ func boundKeys() string {
 	return strings.Join(keys, ", ")
 }
 
+type reqKind int
+
+const (
+	reqNone reqKind = iota
+	reqSound
+	reqSpeak
+)
+
+// request is what Enter on an empty field replays. The zero value means nothing
+// has been asked for yet. It holds no pointers or slices, so copying it is a
+// full copy and callers never alias each other's state.
+type request struct {
+	kind  reqKind
+	text  string // the typed text; the digit itself when kind == reqSound
+	sound sound  // valid only when kind == reqSound
+}
+
+func (r request) label() string {
+	if r.kind == reqSound {
+		return r.sound.name
+	}
+	return r.text
+}
+
+// decision is the outcome of one Enter press.
+type decision struct {
+	play request // kind == reqNone means nothing is dispatched
+	last request // the new replay target; the caller assigns it unconditionally
+	log  string  // colour-tagged status line, or "" to log nothing
+}
+
+// route decides what a single Enter press does, given the raw field contents and
+// the current replay target. It is pure: no I/O, no tview, nothing mutated.
+//
+// Two rules carry the design. Enter ALWAYS consumes the field, in every branch,
+// so the field is never a leftover. And a request that does not dispatch never
+// becomes the replay target — otherwise an unbound digit would both replay its
+// own warning forever and destroy the previous good target.
+func route(in string, last request) decision {
+	text := strings.TrimSpace(in)
+
+	if text == "" {
+		if last.kind == reqNone {
+			return decision{last: last, log: "[yellow]Nothing to replay yet — type something first[-]"}
+		}
+		return decision{
+			play: last,
+			last: last,
+			log:  fmt.Sprintf("[gray]Replay:[-] %s", tview.Escape(last.label())),
+		}
+	}
+
+	if isSoundKey(text) {
+		s, ok := findSound(text)
+		if !ok {
+			return decision{
+				last: last, // unchanged: a warning must not become the replay target
+				log:  fmt.Sprintf("[yellow]No sound bound to %q[-] (bound: %s)", text, boundKeys()),
+			}
+		}
+		r := request{kind: reqSound, text: text, sound: s}
+		return decision{play: r, last: r, log: fmt.Sprintf("[cyan]Play:[-] %s", tview.Escape(s.name))}
+	}
+
+	r := request{kind: reqSpeak, text: text}
+	return decision{
+		play: r,
+		last: r,
+		// Imperative wording on purpose: this echoes the request, and says
+		// nothing about whether the audio was actually reached.
+		log: fmt.Sprintf("[cyan]Speak:[-] %s", tview.Escape(fmt.Sprintf("%q", text))),
+	}
+}
+
+const helpBase = "[gray]1-9: sound • type + Enter: speak • Enter alone: replay • Esc or Ctrl+C: quit[-]"
+
+// helpLabelMax is how much of the replay target the help bar shows, in runes.
+const helpLabelMax = 40
+
+// helpText renders what Enter would currently replay, plus the key hints. The
+// emptied input field no longer shows the target, and the newest log line is
+// often a warning rather than the target, so this is the only honest indicator.
+func helpText(last request) string {
+	if last.kind == reqNone {
+		return helpBase
+	}
+	label := last.label()
+	// Truncate by runes: the text is usually Cyrillic, and byte-slicing would
+	// split a 2-byte rune into replacement characters.
+	if r := []rune(label); len(r) > helpLabelMax {
+		label = string(r[:helpLabelMax]) + "…"
+	}
+	// Target first, hints second. The full line is wider than an 80-column
+	// terminal and the help view is one row tall, so whatever sits at the end
+	// is silently clipped. The static hints can afford to vanish; the replay
+	// target is the only thing on screen that says what Enter will do.
+	// Escape AFTER truncating, or the cut can land inside an inserted escape.
+	return fmt.Sprintf("[white]Enter replays:[-] %s  %s", tview.Escape(label), helpBase)
+}
+
 func main() {
 	app := tview.NewApplication()
 	pl := newPlayer()
@@ -70,44 +170,59 @@ func main() {
 		})
 	status.SetMaxLines(2000)
 
+	help := tview.NewTextView().SetDynamicColors(true)
+	cache := &ttsCache{}
+
+	// last is what Enter on an empty field replays. It is read and written ONLY
+	// by the done func below, which tview runs on the event-loop goroutine, so
+	// it needs no mutex. Nothing inside a pl.Play job may touch it — that would
+	// be a silent data race with no compiler help.
+	var last request
+
 	// Input field
 	var input *tview.InputField
 	input = tview.NewInputField().
 		SetLabel("Text (ru) or 1-9: ").
 		SetFieldWidth(0).
 		SetDoneFunc(func(key tcell.Key) {
+			// tview fires this for Tab and Backtab too; only Enter consumes.
 			if key != tcell.KeyEnter {
 				return
 			}
-			// The text is deliberately left in place: tview fires this on every
-			// Enter, so pressing it again replays the same input.
-			text := strings.TrimSpace(input.GetText())
-			if text == "" {
-				appendStatus(status, "[yellow]Enter some text first[-]")
-				return
+
+			d := route(input.GetText(), last)
+
+			// Consume the field: it was the request, and the request is spent.
+			// Safe from in here only because this InputField has no changed or
+			// autocomplete handler -- adding one would make SetText re-enter
+			// user code while tview holds autocompleteListMutex.
+			input.SetText("")
+			last = d.last
+			help.SetText(helpText(last))
+
+			// Log before dispatching, so the request is recorded by the event
+			// loop and survives even when the next Enter replaces the job
+			// before it ever runs.
+			if d.log != "" {
+				appendStatus(status, d.log)
 			}
 
-			if isSoundKey(text) {
-				s, ok := findSound(text)
-				if !ok {
-					appendStatus(status, fmt.Sprintf("[yellow]No sound bound to %q[-] (bound: %s)", text, boundKeys()))
-					return
-				}
+			// Capture by value: a job must never read tview state.
+			switch d.play.kind {
+			case reqSound:
+				s := d.play.sound
 				pl.Play(func(ctx context.Context) {
-					appendStatus(status, fmt.Sprintf("[cyan]Playing:[-] %s", s.name))
 					report(status, playFile(ctx, s.path))
 				})
-				return
+			case reqSpeak:
+				text := d.play.text
+				pl.Play(func(ctx context.Context) {
+					report(status, speak(ctx, status, cache, text))
+				})
 			}
-
-			pl.Play(func(ctx context.Context) {
-				report(status, synthAndPlay(ctx, status, text))
-			})
 		})
 
-	help := tview.NewTextView().
-		SetDynamicColors(true).
-		SetText("[gray]Enter: speak • 1-9: sound • Enter again: replay (cuts current) • Esc or Ctrl+C to quit[-]")
+	help.SetText(helpText(last))
 
 	// Layout
 	layout := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -254,8 +369,48 @@ func (p *player) Stop() {
 	<-p.done
 }
 
-func synthAndPlay(ctx context.Context, status *tview.TextView, text string) error {
-	appendStatus(status, fmt.Sprintf("[cyan]Synthesize:[-] %s", tview.Escape(fmt.Sprintf("%q", text))))
+// ttsCache holds the audio of the most recently synthesized utterance so that
+// replaying it costs neither an API call nor a second of latency.
+//
+// Today both put and get run on the single player worker, so the mutex is
+// belt-and-braces. It stays because that invariant lives nowhere the compiler
+// can see it, and a second worker would turn this into a real race.
+type ttsCache struct {
+	mu   sync.Mutex
+	text string
+	data []byte // immutable once stored; readers share the backing array
+}
+
+func (c *ttsCache) put(text string, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.text, c.data = text, data
+}
+
+// get is keyed by text on purpose. "Replay whatever is cached" would happily
+// play the previous utterance when synthesis of the current one was cancelled
+// before it ever stored anything.
+func (c *ttsCache) get(text string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.text != text || c.data == nil {
+		return nil, false
+	}
+	return c.data, true
+}
+
+// speak plays an utterance, synthesizing it only if it is not already cached.
+func speak(ctx context.Context, status *tview.TextView, cache *ttsCache, text string) error {
+	if data, ok := cache.get(text); ok {
+		appendStatus(status, "[gray]Cached.[-] Playing…")
+		return playBytes(ctx, data)
+	}
+	return synthAndPlay(ctx, status, cache, text)
+}
+
+func synthAndPlay(ctx context.Context, status *tview.TextView, cache *ttsCache, text string) error {
+	// The request itself was already logged by route, on the event loop.
+	appendStatus(status, "[gray]Synthesizing…[-]")
 
 	// The 30s budget covers synthesis only. Playback is bounded by the audio
 	// itself, and a long utterance runs well past it.
@@ -295,21 +450,12 @@ func synthAndPlay(ctx context.Context, status *tview.TextView, text string) erro
 	}
 	appendStatus(status, "[green]Synthesis complete.[-] Playing…")
 
-	tmp, err := os.CreateTemp("", "tts-*.mp3")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(resp.AudioContent); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp mp3: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp mp3: %w", err)
-	}
+	// Cache before playing, not after: playback is routinely cut short by the
+	// next Enter, and that is exactly the case the cache exists to make free.
+	cache.put(text, resp.AudioContent)
 
 	start := time.Now()
-	if err := playFile(playCtx, tmp.Name()); err != nil {
+	if err := playBytes(playCtx, resp.AudioContent); err != nil {
 		if errors.Is(err, errInterrupted) {
 			// Don't litter the repo with a fallback file on every Enter-mash.
 			return err
@@ -319,6 +465,26 @@ func synthAndPlay(ctx context.Context, status *tview.TextView, text string) erro
 	}
 	appendStatus(status, fmt.Sprintf("[green]Done.[-] (%.1fs)", time.Since(start).Seconds()))
 	return nil
+}
+
+// playBytes plays audio held in memory by handing it to playFile through a temp
+// file. Caching the path instead would mean unlinking on replacement, cleaning
+// up after Stop, and leaking on SIGKILL; rewriting a few hundred KB is free next
+// to spawning ffplay.
+func playBytes(ctx context.Context, data []byte) error {
+	tmp, err := os.CreateTemp("", "tts-*.mp3")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp mp3: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp mp3: %w", err)
+	}
+	return playFile(ctx, tmp.Name())
 }
 
 // playFile plays any format ffmpeg understands.
