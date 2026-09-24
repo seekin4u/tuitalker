@@ -41,12 +41,12 @@ func main() {
 			if key == tcell.KeyEnter {
 				text := input.GetText()
 				if text == "" {
-					appendStatus(app, status, "[yellow]Enter some text first[-]")
+					appendStatus(status, "[yellow]Enter some text first[-]")
 					return
 				}
 				go func(t string) {
 					if err := synthAndPlay(app, status, t); err != nil {
-						appendStatus(app, status, fmt.Sprintf("[red]Error:[-] %v", err))
+						appendStatus(status, fmt.Sprintf("[red]Error:[-] %v", err))
 					}
 				}(text)
 			}
@@ -75,11 +75,11 @@ func main() {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("afplay"); err != nil {
-			appendStatus(app, status, "[yellow]Warning:[-] 'afplay' not found; playback may fail.")
+			appendStatus(status, "[yellow]Warning:[-] 'afplay' not found; playback may fail.")
 		}
 	case "linux":
 		if _, err := exec.LookPath("mpg123"); err != nil {
-			appendStatus(app, status, "[yellow]Warning:[-] 'mpg123' not found; playback may fail.")
+			appendStatus(status, "[yellow]Warning:[-] 'mpg123' not found; playback may fail.")
 		}
 	}
 
@@ -89,7 +89,7 @@ func main() {
 }
 
 func synthAndPlay(app *tview.Application, status *tview.TextView, text string) error {
-	appendStatus(app, status, fmt.Sprintf("[cyan]Synthesize:[-] %q", text))
+	appendStatus(status, fmt.Sprintf("[cyan]Synthesize:[-] %q", text))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -118,14 +118,14 @@ func synthAndPlay(app *tview.Application, status *tview.TextView, text string) e
 	if err != nil {
 		return fmt.Errorf("synthesize: %w", err)
 	}
-	appendStatus(app, status, "[green]Synthesis complete.[-] Playing…")
+	appendStatus(status, "[green]Synthesis complete.[-] Playing…")
 
 	start := time.Now()
 	if err := playMP3(resp.AudioContent); err != nil {
 		_ = os.WriteFile("tts.mp3", resp.AudioContent, 0644)
 		return fmt.Errorf("%w\n(saved fallback file: tts.mp3)", err)
 	}
-	appendStatus(app, status, fmt.Sprintf("[green]Done.[-] (%.1fs)", time.Since(start).Seconds()))
+	appendStatus(status, fmt.Sprintf("[green]Done.[-] (%.1fs)", time.Since(start).Seconds()))
 	return nil
 }
 
@@ -172,9 +172,10 @@ func playMP3(mp3 []byte) error {
 	}
 }
 
-func appendStatus(app *tview.Application, tv *tview.TextView, line string) {
-	app.QueueUpdateDraw(func() {
-		fmt.Fprintln(tv, line)
-		tv.ScrollToEnd()
-	})
+// appendStatus writes straight into the TextView, which is mutex-guarded and
+// safe from any goroutine. It must NOT use QueueUpdateDraw: that blocks until
+// the event loop runs the callback, so calling it from the event loop itself
+// (an InputField done func) deadlocks the application permanently.
+func appendStatus(tv *tview.TextView, line string) {
+	fmt.Fprintln(tv, line)
 }
