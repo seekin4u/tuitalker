@@ -26,9 +26,31 @@ var errInterrupted = errors.New("interrupted")
 
 type sound struct{ key, name, path string }
 
-// Sounds are bound to single digits. Add an entry here to bind another one.
+// Sounds are bound to one- or two-digit numbers. Add an entry here to bind another one.
 var sounds = []sound{
-	{key: "1", name: "mda ebat", path: "mda-ebat.ogg"},
+	{key: "1", name: "mda ebat mp3", path: "mda-ebat.mp3"},
+	{key: "2", name: "come on motherfuckers", path: "come-on-motherfuckers.ogg"},
+	{key: "3", name: "da ty cho", path: "da-ty-cho.ogg"},
+	{key: "4", name: "davaite dumat", path: "davaite-dumat.ogg"},
+	{key: "5", name: "ebany rot etava kazino", path: "ebany-rot-etava-kazino.ogg"},
+	{key: "6", name: "ei pidar", path: "ei_pidar.ogg"},
+	{key: "7", name: "eto pizdec", path: "eto-pizdec.ogg"},
+	{key: "8", name: "gnome wooooooh", path: "gnome-wooooooh.ogg"},
+	{key: "9", name: "hey grandpa", path: "hey-grandpa.ogg"},
+	{key: "10", name: "ignoriruju", path: "ignoriruju.ogg"},
+	{key: "11", name: "ktota vstretil stipzbergena", path: "ktota-vstretil-stipzbergena.ogg"},
+	{key: "12", name: "kusochek demona", path: "kusochek-demona.ogg"},
+	{key: "13", name: "nahui poslan", path: "nahui-poslan.ogg"},
+	{key: "14", name: "null otvetov", path: "null-otvetov.ogg"},
+	{key: "15", name: "pasha hrr tfu", path: "pasha-hrr-tfu.ogg"},
+	{key: "16", name: "pashol nahui", path: "pashol-nahui.ogg"},
+	{key: "17", name: "razduplis", path: "razduplis.ogg"},
+	{key: "18", name: "starina sjebi", path: "starina-sjebi.ogg"},
+	{key: "19", name: "teper o samom hlavnom", path: "teper-o-samom-hlavnom.ogg"},
+	{key: "20", name: "tyazhelo", path: "tyazhelo.ogg"},
+	{key: "21", name: "vas zdes ne zhdut", path: "vas-zdes-ne-zhdut.ogg"},
+	{key: "22", name: "warcraft rabota", path: "warcraft-rabota.ogg"},
+	{key: "23", name: "zhyl i umer", path: "zhyl-i-umer.ogg"},
 }
 
 func findSound(key string) (sound, bool) {
@@ -40,10 +62,18 @@ func findSound(key string) (sound, bool) {
 	return sound{}, false
 }
 
-// isSoundKey reserves single digits for the soundboard. Type "5." or "пять" to
-// have a digit spoken instead.
+// isSoundKey reserves one- and two-digit numbers for the soundboard. Type "5."
+// or "пять" to have a number spoken instead.
 func isSoundKey(s string) bool {
-	return len(s) == 1 && s[0] >= '0' && s[0] <= '9'
+	if len(s) == 0 || len(s) > 2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func boundKeys() string {
@@ -128,7 +158,7 @@ func route(in string, last request) decision {
 	}
 }
 
-const helpBase = "[gray]1-9: sound • type + Enter: speak • Enter alone: replay • Esc or Ctrl+C: quit[-]"
+const helpBase = "[gray]number: sound • type + Enter: speak • Enter alone: replay • Esc or Ctrl+C: quit[-]"
 
 // helpLabelMax is how much of the replay target the help bar shows, in runes.
 const helpLabelMax = 40
@@ -182,7 +212,7 @@ func main() {
 	// Input field
 	var input *tview.InputField
 	input = tview.NewInputField().
-		SetLabel("Text (ru) or 1-9: ").
+		SetLabel("Text (ru) or number: ").
 		SetFieldWidth(0).
 		SetDoneFunc(func(key tcell.Key) {
 			// tview fires this for Tab and Backtab too; only Enter consumes.

@@ -267,12 +267,12 @@ func TestPlayFileSuccessHasNoFalsePositive(t *testing.T) {
 }
 
 func TestIsSoundKeyAndFindSound(t *testing.T) {
-	for _, s := range []string{"0", "1", "9"} {
+	for _, s := range []string{"0", "1", "9", "10", "99"} {
 		if !isSoundKey(s) {
 			t.Errorf("isSoundKey(%q) = false, want true", s)
 		}
 	}
-	for _, s := range []string{"", "10", "1.", "привет", "5 ", "a"} {
+	for _, s := range []string{"", "100", "1.", "привет", "5 ", "a"} {
 		if isSoundKey(s) {
 			t.Errorf("isSoundKey(%q) = true, want false", s)
 		}
@@ -280,8 +280,8 @@ func TestIsSoundKeyAndFindSound(t *testing.T) {
 	if _, ok := findSound("1"); !ok {
 		t.Error(`findSound("1") not bound`)
 	}
-	if _, ok := findSound("7"); ok {
-		t.Error(`findSound("7") unexpectedly bound`)
+	if _, ok := findSound("99"); ok {
+		t.Error(`findSound("99") unexpectedly bound`)
 	}
 }
 
@@ -371,7 +371,7 @@ func TestRouteBoundDigit(t *testing.T) {
 // The one that matters: a warning must not destroy the replay target.
 func TestRouteUnboundDigitDoesNotClobberLast(t *testing.T) {
 	prev := speakReq("привет")
-	d := route("5", prev)
+	d := route("99", prev)
 	if d.play.kind != reqNone {
 		t.Fatalf("play = %+v, want nothing dispatched", d.play)
 	}
@@ -427,7 +427,7 @@ func TestHelpTextEmptyTarget(t *testing.T) {
 // 80-column terminal and the help view is one row, so the tail is clipped.
 func TestHelpTextPutsTargetBeforeHints(t *testing.T) {
 	got := helpText(speakReq("привет"))
-	target, hints := strings.Index(got, helpMarker), strings.Index(got, "1-9: sound")
+	target, hints := strings.Index(got, helpMarker), strings.Index(got, "number: sound")
 	if target < 0 || hints < 0 {
 		t.Fatalf("helpText = %q, want both target and hints", got)
 	}
